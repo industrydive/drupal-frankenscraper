@@ -3,6 +3,7 @@ import settings
 import sys
 import urllib2
 import json
+import time
 from bs4 import BeautifulSoup
 
 TESTING = sys.argv[0].endswith('nosetests')
@@ -26,7 +27,7 @@ def get_nodes_to_export_from_db():
     node_query = (
         "select nid, changed, type as content_type from node where type in "
         "('post', 'podcast', 'infographic') "
-        "and status = 1 order by changed DESC limit 125"
+        "and status = 1 order by changed DESC limit 5"
     )
     node_cursor = db.cursor()
     node_cursor.execute(node_query)
@@ -167,7 +168,8 @@ def get_page(url):
 
 
 def write_html_content_to_output(nodes_to_export):
-    outfile = open('output/out.jl', 'w+')
+    file_time = time.strftime("%Y-%m-%d_%H:%M:%S")
+    outfile = open('output/%s.jl' % file_time, 'w+')
     author_links = []
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
