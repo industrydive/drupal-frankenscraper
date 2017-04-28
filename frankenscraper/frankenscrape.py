@@ -1,12 +1,43 @@
+import os
 import MySQLdb
 import settings
-import sys
 import urllib2
 import json
 import time
+import string
+import argparse
+import datetime
 from bs4 import BeautifulSoup
 
-TESTING = sys.argv[0].endswith('nosetests')
+parser = argparse.ArgumentParser(description='ETL for getting drupal 7 post and user data and web site pages into JSON lines files')
+parser.add_argument(
+    '--limit',
+    help='INT: limit initial node query',
+    dest='limit',
+    type=int,
+    required=False
+)
+
+parser.add_argument(
+    '--clean',
+    help=(
+        'Flag to empty the output directory to clean up from previous runs.'
+    ),
+    action='store_true',
+    dest='clean',
+    required=False,
+)
+
+parser.add_argument(
+    '--dry-run',
+    help=(
+        'Flag to not save any data, just return printed info about what would happen'
+    ),
+    action='store_true',
+    dest='dry_run',
+)
+
+args = parser.parse_args()
 
 kwargs = {}
 if settings.mysql_pw:
@@ -24,26 +55,44 @@ db = MySQLdb.connect(**kwargs)
 
 
 def get_nodes_to_export_from_db():
+    # this query gets back the identifying information for the posts we want
+    # as well as the node and full path URLs that we can use to get the current
+    # actual HTML page
     node_query = (
-        "select nid, changed, type as content_type from node where type in "
-        "('post', 'podcast', 'infographic') "
-        "and status = 1 order by changed DESC limit 5"
+        "select n.nid, n.changed, n.type as content_type, u.alias, u.source "
+        "from node n join url_alias u on u.source = CONCAT('node/', n.nid) "
+        "where n.type ='post' and n.status = 1 "
+        "and u.pid=(select pid from url_alias where source = u.source order by pid desc limit 1) "
+        "order by n.changed DESC "
     )
+    if args.limit:
+        node_query = node_query + 'limit %s' % args.limit
     node_cursor = db.cursor()
     node_cursor.execute(node_query)
     nodes = []
-    for nid, changed, content_type in node_cursor:
-        node_data = {'nid': nid, 'changed': changed, 'content_type': content_type}
-
-        url_alias_query = "select source, alias from url_alias where source = 'node/%s'" % nid
-        url_alias_cursor = db.cursor()
-        url_alias_cursor.execute(url_alias_query)
-
-        for source, alias in url_alias_cursor:
-            node_data['node_url_path'] = source
-            node_data['url_path'] = alias
+    for nid, changed, content_type, alias, source in node_cursor:
+        node_data = {
+            'nid': nid,
+            'changed': changed,
+            'content_type': content_type,
+            'node_url_path': source,
+            'url_path': alias,
+        }
         nodes.append(node_data)
     return nodes
+
+
+def printable(string_in):
+    """ Return a string with any non-printable characters removed
+    """
+    filtered_chars = []
+    printable_chars = set(string.printable)
+    for char in string_in:
+        if char in printable_chars:
+            filtered_chars.append(char)
+        else:
+            filtered_chars.append(' ')
+    return ''.join(filtered_chars)
 
 
 def get_page_title(page):
@@ -92,7 +141,7 @@ def get_pub_and_author_info(page):
 def get_story_body(page):
     body_div = page.body.find('div', {'class': 'field-name-body'})
     body_content_div = body_div.find('div', {'property': 'content:encoded'})
-    return body_content_div.decode_contents(formatter="html")
+    return printable(body_content_div.decode_contents(formatter="html"))
 
 
 def get_author_div_text(page, target_class):
@@ -103,24 +152,9 @@ def get_author_div_text(page, target_class):
     target_div = page.body.find('div', {'class': target_class})
     if target_div:
         target_content_div = target_div.find('div', {'class': 'field-item even'})
-        return target_content_div.text.strip()
+        result = target_content_div.text.strip()
+        return printable(result)
     return None
-
-
-def get_author_bio(page):
-    return get_author_div_text(page, 'field-name-field-user-biography')
-
-
-def get_author_fullname(page):
-    return get_author_div_text(page, 'field-name-user-full-name')
-
-
-def get_author_company_name(page):
-    return get_author_div_text(page, 'field-name-field-user-company-name')
-
-
-def get_author_job_title(page):
-    return get_author_div_text(page, 'field-name-field-user-job-title')
 
 
 def get_author_website_url(page):
@@ -133,8 +167,10 @@ def get_author_website_url(page):
 
 def get_author_headshot_url(page):
     image_div = page.body.find('div', {'class': 'field-name-ds-user-picture'})
-    image_div = image_div.find('img')
-    return image_div['src']
+    if image_div:
+        image_div = image_div.find('img')
+        return image_div['src']
+    return None
 
 
 def get_author_social_urls(page):
@@ -162,23 +198,29 @@ def get_page(url):
         response = opener.open(url)
         page_content = response.read()
         page = BeautifulSoup(page_content, "html.parser")
-        return page
-    except Exception:
-        return None
+        return page, None
+    except Exception, e:
+        return None, str(e)
 
 
 def write_html_content_to_output(nodes_to_export):
     file_time = time.strftime("%Y-%m-%d_%H:%M:%S")
-    outfile = open('output/%s.jl' % file_time, 'w+')
+    outfile_story = open('output/%s-story.jl' % file_time, 'w+')
+    outfile_user = open('output/%s-user.jl' % file_time, 'w+')
+    error_file = None
     author_links = []
+    story_success_count = 0
+    user_success_count = 0
+    error_count = 0
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
-        page = get_page(full_url)
+        page, error = get_page(full_url)
         if page:
             node['title'] = get_page_title(page)
             node['canonical_url'] = get_canonical_url(page)
             node['meta_description'] = get_meta_description(page)
             node['story_title'] = get_story_title(page)
+            node['topic'] = node['url_path'].split('/')[0]
             (
                 node['author_name'],
                 node['author_link'],
@@ -187,42 +229,94 @@ def write_html_content_to_output(nodes_to_export):
             ) = get_pub_and_author_info(page)
             node['story_body'] = get_story_body(page)
             json_string = json.dumps(node)
-            outfile.write(json_string + '\n')
+            outfile_story.write(json_string + '\n')
             if node['author_link'] not in author_links:
                 author_links.append(node['author_link'])
 
                 uid, email = get_user_db_data(node['author_username'])
-                page_data = {
+                user_page_data = {
                     'uid': uid,
                     'email': email,
                     'profile_url': node['author_link'],
                     'username': node['author_username']
                 }
-                page = get_page(node['author_link'])
-                if page:
-                    page_data['content_type'] = 'user'
-                    page_data['bio'] = get_author_bio(page)
-                    page_data['fullname'] = get_author_fullname(page)
-                    page_data['company_name'] = get_author_company_name(page)
-                    page_data['job_title'] = get_author_job_title(page)
-                    page_data['headshot_url'] = get_author_headshot_url(page)
-                    social_link_urls = get_author_social_urls(page)
-                    page_data['facebook_url'] = social_link_urls['facebook']
-                    page_data['twitter_url'] = social_link_urls['twitter']
-                    page_data['linkedin_url'] = social_link_urls['linkedin']
-                    page_data['google_url'] = social_link_urls['google']
-                    page_data['website'] = get_author_website_url(page)
+                user_page, user_page_error = get_page(node['author_link'])
+                if user_page:
+                    user_page_data['content_type'] = 'user'
+                    user_page_data['bio'] = get_author_div_text(user_page, 'field-name-field-user-biography')
+                    user_page_data['fullname'] = get_author_div_text(user_page, 'field-name-user-full-name')
+                    user_page_data['company_name'] = get_author_div_text(user_page, 'field-name-field-user-company-name')
+                    user_page_data['job_title'] = get_author_div_text(user_page, 'field-name-field-user-job-title')
+                    user_page_data['headshot_url'] = get_author_headshot_url(user_page)
+                    user_page_data['website'] = get_author_website_url(user_page)
 
-                json_string = json.dumps(page_data)
-                outfile.write(json_string + '\n')
+                    social_link_urls = get_author_social_urls(user_page)
+                    user_page_data['facebook_url'] = social_link_urls['facebook']
+                    user_page_data['twitter_url'] = social_link_urls['twitter']
+                    user_page_data['linkedin_url'] = social_link_urls['linkedin']
+                    user_page_data['google_url'] = social_link_urls['google']
+                    user_success_count += 1
+                else:
+                    if not error_file:
+                        error_file = open('output/%s-error.jl' % file_time, 'w+')
+                    error_data = {
+                        'type': 'user page',
+                        'url': node['author_link'],
+                        'error': user_page_error,
+                    }
+                    error_data_string = json.dumps(error_data)
+                    error_file.write(error_data_string + '\n')
+                    error_count += 1
 
-    outfile.close()
+                # we want the user_page_data written outside of the if user_page
+                # block because a user needs to be created to link the story
+                # object to even if we can't get their profile right now.
+                json_string = json.dumps(user_page_data)
+                outfile_user.write(json_string + '\n')
+
+            story_success_count += 1
+        else:
+            if not error_file:
+                error_file = open('output/%s-error.jl' % file_time, 'w+')
+            error_data = {
+                'type': 'story page',
+                'url': full_url,
+                'error': error,
+            }
+            error_data_string = json.dumps(error_data)
+            error_file.write(error_data_string + '\n')
+            error_count += 1
+
+    outfile_story.close()
+    outfile_user.close()
+    if error_file:
+        error_file.close()
+
+    return story_success_count, user_success_count, error_count
 
 
 def main():
     print "GIVE MY CREATION LIFE"
-    nodes_to_export = get_nodes_to_export_from_db()
-    write_html_content_to_output(nodes_to_export)
+    starttime = datetime.datetime.now()
+    if args.clean:
+        filelist = [f for f in os.listdir("output/") if f.endswith(".jl")]
+        print "cleaning %d files from output/" % len(filelist)
+        for f in filelist:
+            os.remove("output/%s" % f)
 
+    nodes_to_export = get_nodes_to_export_from_db()
+    if len(nodes_to_export) > 0:
+        print "Found %d stories to export" % len(nodes_to_export)
+        if args.dry_run:
+            return
+        story_success_count, user_success_count, error_count = write_html_content_to_output(nodes_to_export)
+        print "Parsed %d stories" % story_success_count
+        print "Parsed %d users" % user_success_count
+        print "Had %d HTTP errors" % error_count
+    else:
+        print "Didn't find anything to export"
+    endtime = datetime.datetime.now()
+    total_time = endtime - starttime
+    print "total time: %s" % total_time
 if __name__ == "__main__":
     main()
