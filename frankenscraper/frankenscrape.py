@@ -23,7 +23,7 @@ db = MySQLdb.connect(**kwargs)
 
 
 def get_nodes_to_export_from_db():
-    node_query = "select nid, changed from node where type = 'post' and status = 1 order by changed DESC limit 15"
+    node_query = "select nid, changed from node where type = 'post' and status = 1 order by changed DESC limit 25"
     node_cursor = db.cursor()
     node_cursor.execute(node_query)
     nodes = []
@@ -65,13 +65,62 @@ def get_pub_and_author_info(page):
     author_name = pub_date_div.p.a.text
     pub_date = pub_date_div.p.text.replace(author_name, '').strip()
     author_link = pub_date_div.p.a['href']
-    return author_name, author_link, pub_date
+    author_username = author_link.split('/')[-1]
+    return author_name, author_link, author_username, pub_date
 
 
 def get_story_body(page):
     body_div = page.body.find('div', {'class': 'field-name-body'})
     body_content_div = body_div.find('div', {'property': 'content:encoded'})
     return body_content_div.decode_contents(formatter="html")
+
+
+def get_author_div_text(page, target_class):
+    """ Mostly all of the fields in the author profile are nested in the same
+        little template pattern. Here's a generic function for pulling out the
+        text of a given field class.
+    """
+    target_div = page.body.find('div', {'class': target_class})
+    if target_div:
+        target_content_div = target_div.find('div', {'class': 'field-item even'})
+        return target_content_div.text.strip()
+    return None
+
+
+def get_author_bio(page):
+    return get_author_div_text(page, 'field-name-field-user-biography')
+
+
+def get_author_fullname(page):
+    return get_author_div_text(page, 'field-name-user-full-name')
+
+
+def get_author_company_name(page):
+    return get_author_div_text(page, 'field-name-field-user-company-name')
+
+
+def get_author_headshot_url(page):
+    image_div = page.body.find('div', {'class': 'field-name-ds-user-picture'})
+    image_div = image_div.find('img')
+    return image_div['src']
+
+
+def get_author_social_urls(page):
+    social_network_link_ids = [
+        'facebook',
+        'twitter',
+        'linkedin',
+        'google',
+    ]
+    social_network_links = {}
+    for link_id in social_network_link_ids:
+        link_div = page.body.find('div', {'class': 'field-name-field-user-%s-url' % link_id})
+        if link_div:
+            link_content_div = link_div.find('div', {'class': 'field-item even'})
+            social_network_links[link_id] = link_content_div.a['href']
+        else:
+            social_network_links[link_id] = None
+    return social_network_links
 
 
 def get_page(url):
@@ -88,6 +137,7 @@ def get_page(url):
 
 def write_html_content_to_output(nodes_to_export):
     outfile = open('output/story.jl', 'w+')
+    author_links = []
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
         page = get_page(full_url)
@@ -99,12 +149,36 @@ def write_html_content_to_output(nodes_to_export):
             (
                 node['author_name'],
                 node['author_link'],
+                node['author_username'],
                 node['pub_date']
             ) = get_pub_and_author_info(page)
             node['story_body'] = get_story_body(page)
             json_string = json.dumps(node)
             outfile.write(json_string + '\n')
+            if (node['author_link'], node['author_username']) not in author_links:
+                author_links.append((node['author_link'], node['author_username']))
+    outfile.close()
 
+    outfile = open('output/author.jl', 'w+')
+    for author_link, author_username in author_links:
+        page_data = {
+            'profile_url': author_link,
+            'username': author_username
+        }
+        page = get_page(author_link)
+        if page:
+            page_data['bio'] = get_author_bio(page)
+            page_data['fullname'] = get_author_fullname(page)
+            page_data['company_name'] = get_author_company_name(page)
+            page_data['headshot_url'] = get_author_headshot_url(page)
+            social_link_urls = get_author_social_urls(page)
+            page_data['facebook_url'] = social_link_urls['facebook']
+            page_data['twitter_url'] = social_link_urls['twitter']
+            page_data['linkedin_url'] = social_link_urls['linkedin']
+            page_data['google_url'] = social_link_urls['google']
+
+        json_string = json.dumps(page_data)
+        outfile.write(json_string + '\n')
     outfile.close()
 
 
