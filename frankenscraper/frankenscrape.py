@@ -23,12 +23,16 @@ db = MySQLdb.connect(**kwargs)
 
 
 def get_nodes_to_export_from_db():
-    node_query = "select nid, changed from node where type = 'post' and status = 1 order by changed DESC limit 25"
+    node_query = (
+        "select nid, changed, type as content_type from node where type in "
+        "('post', 'podcast', 'infographic') "
+        "and status = 1 order by changed DESC limit 125"
+    )
     node_cursor = db.cursor()
     node_cursor.execute(node_query)
     nodes = []
-    for nid, changed in node_cursor:
-        node_data = {'nid': nid, 'changed': changed}
+    for nid, changed, content_type in node_cursor:
+        node_data = {'nid': nid, 'changed': changed, 'content_type': content_type}
 
         url_alias_query = "select source, alias from url_alias where source = 'node/%s'" % nid
         url_alias_cursor = db.cursor()
@@ -58,6 +62,21 @@ def get_meta_description(page):
 
 def get_story_title(page):
     return page.body.find('div', property='dc:title').h3.a.text
+
+
+def get_user_db_data(username):
+    # derive the UID from the source URL for the profile:
+    user_url_alias_query = "select substring(source, 6) as uid from url_alias where alias = 'users/%s'" % username
+    user_url_alias_cursor = db.cursor()
+    user_url_alias_cursor.execute(user_url_alias_query)
+    for uid in user_url_alias_cursor:
+        uid = uid
+
+    user_query = "select uid, mail from users where uid = %s" % uid
+    user_cursor = db.cursor()
+    user_cursor.execute(user_query)
+    for uid, mail in user_cursor:
+        return uid, mail
 
 
 def get_pub_and_author_info(page):
@@ -99,6 +118,18 @@ def get_author_company_name(page):
     return get_author_div_text(page, 'field-name-field-user-company-name')
 
 
+def get_author_job_title(page):
+    return get_author_div_text(page, 'field-name-field-user-job-title')
+
+
+def get_author_website_url(page):
+    div = page.body.find('div', {'class': 'field-name-field-user-website'})
+    if div:
+        link = div.find('a')
+        return link['href']
+    return None
+
+
 def get_author_headshot_url(page):
     image_div = page.body.find('div', {'class': 'field-name-ds-user-picture'})
     image_div = image_div.find('img')
@@ -136,7 +167,7 @@ def get_page(url):
 
 
 def write_html_content_to_output(nodes_to_export):
-    outfile = open('output/story.jl', 'w+')
+    outfile = open('output/out.jl', 'w+')
     author_links = []
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
@@ -155,30 +186,34 @@ def write_html_content_to_output(nodes_to_export):
             node['story_body'] = get_story_body(page)
             json_string = json.dumps(node)
             outfile.write(json_string + '\n')
-            if (node['author_link'], node['author_username']) not in author_links:
-                author_links.append((node['author_link'], node['author_username']))
-    outfile.close()
+            if node['author_link'] not in author_links:
+                author_links.append(node['author_link'])
 
-    outfile = open('output/author.jl', 'w+')
-    for author_link, author_username in author_links:
-        page_data = {
-            'profile_url': author_link,
-            'username': author_username
-        }
-        page = get_page(author_link)
-        if page:
-            page_data['bio'] = get_author_bio(page)
-            page_data['fullname'] = get_author_fullname(page)
-            page_data['company_name'] = get_author_company_name(page)
-            page_data['headshot_url'] = get_author_headshot_url(page)
-            social_link_urls = get_author_social_urls(page)
-            page_data['facebook_url'] = social_link_urls['facebook']
-            page_data['twitter_url'] = social_link_urls['twitter']
-            page_data['linkedin_url'] = social_link_urls['linkedin']
-            page_data['google_url'] = social_link_urls['google']
+                uid, email = get_user_db_data(node['author_username'])
+                page_data = {
+                    'uid': uid,
+                    'email': email,
+                    'profile_url': node['author_link'],
+                    'username': node['author_username']
+                }
+                page = get_page(node['author_link'])
+                if page:
+                    page_data['content_type'] = 'user'
+                    page_data['bio'] = get_author_bio(page)
+                    page_data['fullname'] = get_author_fullname(page)
+                    page_data['company_name'] = get_author_company_name(page)
+                    page_data['job_title'] = get_author_job_title(page)
+                    page_data['headshot_url'] = get_author_headshot_url(page)
+                    social_link_urls = get_author_social_urls(page)
+                    page_data['facebook_url'] = social_link_urls['facebook']
+                    page_data['twitter_url'] = social_link_urls['twitter']
+                    page_data['linkedin_url'] = social_link_urls['linkedin']
+                    page_data['google_url'] = social_link_urls['google']
+                    page_data['website'] = get_author_website_url(page)
 
-        json_string = json.dumps(page_data)
-        outfile.write(json_string + '\n')
+                json_string = json.dumps(page_data)
+                outfile.write(json_string + '\n')
+
     outfile.close()
 
 
