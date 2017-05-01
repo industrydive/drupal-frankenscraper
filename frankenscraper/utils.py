@@ -262,7 +262,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
                             'error': user_page_error,
                         }
                         error_data_string = json.dumps(error_data)
-                        logging.error(error_data_string)
+                        logging.debug("ERROR: " + error_data_string)
                         error_count += 1
 
                     # we want the user_page_data written outside of the if user_page
@@ -286,7 +286,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
                     'error': str(e),
                 }
                 error_data_string = json.dumps(error_data)
-                logging.error(error_data_string)
+                logging.debug("ERROR: " + error_data_string)
                 error_count += 1
         else:
             error_data = {
@@ -297,7 +297,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
                 'error': error,
             }
             error_data_string = json.dumps(error_data)
-            logging.error(error_data_string)
+            logging.debug("ERROR: " + error_data_string)
             error_count += 1
 
     return story_success_count, user_success_count, error_count
