@@ -30,6 +30,14 @@ Usage
 	(this will query for stories with a changed value greater than
 	1416503465)
 
+	If not specified, the script will look for a value in a file called
+	.highest_changed_epoch, which would have been set by a previous run
+	of the script. This is updated each time the script successfully writes
+	the data for a story to the corresponding output file, so if the script
+	fails, it is likely you can have it pick up where it left off.
+
+	If the .highest_changed_epoch file is not found, the script will use 0.
+
 Output
 -------
 Each time you run the frankenscraper, it will create a new directory in the
@@ -43,5 +51,5 @@ should get 3 files:
 		the content and metadata of an SMT story
 	3) user.jl
 		A JSON lines file, where each line is a JSON formatted string with the
-		profile page content and metadata of an SMT story. For "uid" in
+		profile page content and metadata of an SMT story. For every "uid" in
 		story.jl, there should be a row in user.jl
