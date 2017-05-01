@@ -7,6 +7,7 @@ import time
 import string
 import argparse
 import datetime
+import logging
 from bs4 import BeautifulSoup
 
 parser = argparse.ArgumentParser(description='ETL for getting drupal 7 post and user data and web site pages into JSON lines files')
@@ -19,16 +20,6 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    '--clean',
-    help=(
-        'Flag to empty the output directory to clean up from previous runs.'
-    ),
-    action='store_true',
-    dest='clean',
-    required=False,
-)
-
-parser.add_argument(
     '--dry-run',
     help=(
         'Flag to not save any data, just return printed info about what would happen'
@@ -37,24 +28,60 @@ parser.add_argument(
     dest='dry_run',
 )
 
+parser.add_argument(
+    '--epoch-changed',
+    help=(
+        'Specify an epoch timestamp to select as earliest \'changed\' value to '
+        'export data. Without this setting, the script '
+        'will look for a stored file with the latest epoch of a previous run '
+        'and default to 0.'
+        'HINT: use --epoch-changed 1 to make the script select all posts. '
+    ),
+    dest='changed_epoch',
+    type=int,
+    required=False,
+)
+
 args = parser.parse_args()
 
-kwargs = {}
-if settings.mysql_pw:
-    kwargs['passwd'] = settings.mysql_pw
-if settings.mysql_user:
-    kwargs['user'] = settings.mysql_user
-if settings.mysql_host:
-    kwargs['host'] = settings.mysql_host
-if settings.mysql_db:
-    kwargs['db'] = settings.mysql_db
-if settings.mysql_port:
-    kwargs['port'] = settings.mysql_port
 
-db = MySQLdb.connect(**kwargs)
+def set_up_files_and_logger():
+    file_time = time.strftime("%Y-%m-%d_%H:%M:%S")
+    out_dir = 'output/%s' % file_time
+    os.makedirs(out_dir)
+
+    outfile_story = open('%s/story.jl' % out_dir, 'w+')
+    outfile_user = open('%s/user.jl' % out_dir, 'w+')
+    outfile_log_name = '%s/frankenscrape.log' % out_dir
+
+    return outfile_story, outfile_user, outfile_log_name
 
 
-def get_nodes_to_export_from_db():
+def get_db_connection():
+    """ Establish a mysql database connection from given settings file values
+        Return the database connection object
+    """
+    kwargs = {}
+    if settings.mysql_pw:
+        kwargs['passwd'] = settings.mysql_pw
+    if settings.mysql_user:
+        kwargs['user'] = settings.mysql_user
+    if settings.mysql_host:
+        kwargs['host'] = settings.mysql_host
+    if settings.mysql_db:
+        kwargs['db'] = settings.mysql_db
+    if settings.mysql_port:
+        kwargs['port'] = settings.mysql_port
+
+    db = MySQLdb.connect(**kwargs)
+
+    return db
+
+
+db = get_db_connection()
+
+
+def get_nodes_to_export_from_db(changed_epoch):
     # this query gets back the identifying information for the posts we want
     # as well as the node and full path URLs that we can use to get the current
     # actual HTML page
@@ -63,8 +90,10 @@ def get_nodes_to_export_from_db():
         "from node n join url_alias u on u.source = CONCAT('node/', n.nid) "
         "where n.type ='post' and n.status = 1 "
         "and u.pid=(select pid from url_alias where source = u.source order by pid desc limit 1) "
-        "order by n.changed DESC "
+        "and n.changed > %d "
+        "order by n.changed ASC "
     )
+    node_query = node_query % changed_epoch
     if args.limit:
         node_query = node_query + 'limit %s' % args.limit
     node_cursor = db.cursor()
@@ -119,14 +148,16 @@ def get_user_db_data(username):
     user_url_alias_query = "select substring(source, 6) as uid from url_alias where alias = 'users/%s'" % username
     user_url_alias_cursor = db.cursor()
     user_url_alias_cursor.execute(user_url_alias_query)
+    uid = None
     for uid in user_url_alias_cursor:
         uid = uid
-
-    user_query = "select uid, mail from users where uid = %s" % uid
-    user_cursor = db.cursor()
-    user_cursor.execute(user_query)
-    for uid, mail in user_cursor:
-        return uid, mail
+    if uid:
+        user_query = "select uid, mail from users where uid = %s" % uid
+        user_cursor = db.cursor()
+        user_cursor.execute(user_query)
+        for uid, mail in user_cursor:
+            return uid, mail
+    return None, None
 
 
 def get_pub_and_author_info(page):
@@ -203,94 +234,104 @@ def get_page(url):
         return None, str(e)
 
 
-def write_html_content_to_output(nodes_to_export):
-    file_time = time.strftime("%Y-%m-%d_%H:%M:%S")
-    outfile_story = open('output/%s-story.jl' % file_time, 'w+')
-    outfile_user = open('output/%s-user.jl' % file_time, 'w+')
-    error_file = None
+def write_html_content_to_output(nodes_to_export, outfile_story, outfile_user):
     author_links = []
     story_success_count = 0
     user_success_count = 0
     error_count = 0
+    highest_epoch = 0
+    logging.debug("Starting export")
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
         page, error = get_page(full_url)
+        logging.info("exporting node %s at url %s" % (node['nid'], node['url_path']))
+
         if page:
-            node['title'] = get_page_title(page)
-            node['canonical_url'] = get_canonical_url(page)
-            node['meta_description'] = get_meta_description(page)
-            node['story_title'] = get_story_title(page)
-            node['topic'] = node['url_path'].split('/')[0]
-            (
-                node['author_name'],
-                node['author_link'],
-                node['author_username'],
-                node['pub_date']
-            ) = get_pub_and_author_info(page)
-            node['story_body'] = get_story_body(page)
-            json_string = json.dumps(node)
-            outfile_story.write(json_string + '\n')
-            if node['author_link'] not in author_links:
-                author_links.append(node['author_link'])
+            try:
+                node['title'] = get_page_title(page)
+                node['canonical_url'] = get_canonical_url(page)
+                node['meta_description'] = get_meta_description(page)
+                node['story_title'] = get_story_title(page)
+                node['topic'] = node['url_path'].split('/')[0]
+                (
+                    node['author_name'],
+                    node['author_link'],
+                    node['author_username'],
+                    node['pub_date']
+                ) = get_pub_and_author_info(page)
+                node['story_body'] = get_story_body(page)
+                json_string = json.dumps(node)
+                outfile_story.write(json_string + '\n')
+                if node['author_link'] not in author_links:
+                    author_links.append(node['author_link'])
 
-                uid, email = get_user_db_data(node['author_username'])
-                user_page_data = {
-                    'uid': uid,
-                    'email': email,
-                    'profile_url': node['author_link'],
-                    'username': node['author_username']
-                }
-                user_page, user_page_error = get_page(node['author_link'])
-                if user_page:
-                    user_page_data['content_type'] = 'user'
-                    user_page_data['bio'] = get_author_div_text(user_page, 'field-name-field-user-biography')
-                    user_page_data['fullname'] = get_author_div_text(user_page, 'field-name-user-full-name')
-                    user_page_data['company_name'] = get_author_div_text(user_page, 'field-name-field-user-company-name')
-                    user_page_data['job_title'] = get_author_div_text(user_page, 'field-name-field-user-job-title')
-                    user_page_data['headshot_url'] = get_author_headshot_url(user_page)
-                    user_page_data['website'] = get_author_website_url(user_page)
-
-                    social_link_urls = get_author_social_urls(user_page)
-                    user_page_data['facebook_url'] = social_link_urls['facebook']
-                    user_page_data['twitter_url'] = social_link_urls['twitter']
-                    user_page_data['linkedin_url'] = social_link_urls['linkedin']
-                    user_page_data['google_url'] = social_link_urls['google']
-                    user_success_count += 1
-                else:
-                    if not error_file:
-                        error_file = open('output/%s-error.jl' % file_time, 'w+')
-                    error_data = {
-                        'type': 'user page',
-                        'url': node['author_link'],
-                        'error': user_page_error,
+                    uid, email = get_user_db_data(node['author_username'])
+                    user_page_data = {
+                        'uid': uid,
+                        'email': email,
+                        'profile_url': node['author_link'],
+                        'username': node['author_username']
                     }
-                    error_data_string = json.dumps(error_data)
-                    error_file.write(error_data_string + '\n')
-                    error_count += 1
+                    user_page, user_page_error = get_page(node['author_link'])
+                    if user_page:
+                        user_page_data['content_type'] = 'user'
+                        user_page_data['bio'] = get_author_div_text(user_page, 'field-name-field-user-biography')
+                        user_page_data['fullname'] = get_author_div_text(user_page, 'field-name-user-full-name')
+                        user_page_data['company_name'] = get_author_div_text(user_page, 'field-name-field-user-company-name')
+                        user_page_data['job_title'] = get_author_div_text(user_page, 'field-name-field-user-job-title')
+                        user_page_data['headshot_url'] = get_author_headshot_url(user_page)
+                        user_page_data['website'] = get_author_website_url(user_page)
 
-                # we want the user_page_data written outside of the if user_page
-                # block because a user needs to be created to link the story
-                # object to even if we can't get their profile right now.
-                json_string = json.dumps(user_page_data)
-                outfile_user.write(json_string + '\n')
+                        social_link_urls = get_author_social_urls(user_page)
+                        user_page_data['facebook_url'] = social_link_urls['facebook']
+                        user_page_data['twitter_url'] = social_link_urls['twitter']
+                        user_page_data['linkedin_url'] = social_link_urls['linkedin']
+                        user_page_data['google_url'] = social_link_urls['google']
+                        user_success_count += 1
+                    else:
+                        error_data = {
+                            'object_type': 'user',
+                            'type': 'HTTP error',
+                            'url': node['author_link'],
+                            'error': user_page_error,
+                        }
+                        error_data_string = json.dumps(error_data)
+                        logging.error(error_data_string)
+                        error_count += 1
 
-            story_success_count += 1
+                    # we want the user_page_data written outside of the if user_page
+                    # block because a user needs to be created to link the story
+                    # object to even if we can't get their profile right now.
+                    json_string = json.dumps(user_page_data)
+                    outfile_user.write(json_string + '\n')
+
+                story_success_count += 1
+                if int(node['changed']) > highest_epoch:
+                    epoch_changed_file = open('.highest_changed_epoch', 'w+')
+                    epoch_changed_file.write(str(node['changed']))
+                    epoch_changed_file.close()
+                    highest_epoch = int(node['changed'])
+                    logging.debug('updated highest_epoch to %s' % highest_epoch)
+            except Exception, e:
+                error_data = {
+                    'object_type': 'story',
+                    'type': 'parsing error',
+                    'url': full_url,
+                    'error': str(e),
+                }
+                error_data_string = json.dumps(error_data)
+                logging.error(error_data_string)
+                error_count += 1
         else:
-            if not error_file:
-                error_file = open('output/%s-error.jl' % file_time, 'w+')
             error_data = {
-                'type': 'story page',
+                'object_type': 'story',
+                'type': 'HTTP error',
                 'url': full_url,
                 'error': error,
             }
             error_data_string = json.dumps(error_data)
-            error_file.write(error_data_string + '\n')
+            logging.error(error_data_string)
             error_count += 1
-
-    outfile_story.close()
-    outfile_user.close()
-    if error_file:
-        error_file.close()
 
     return story_success_count, user_success_count, error_count
 
@@ -298,25 +339,42 @@ def write_html_content_to_output(nodes_to_export):
 def main():
     print "GIVE MY CREATION LIFE"
     starttime = datetime.datetime.now()
-    if args.clean:
-        filelist = [f for f in os.listdir("output/") if f.endswith(".jl")]
-        print "cleaning %d files from output/" % len(filelist)
-        for f in filelist:
-            os.remove("output/%s" % f)
+    outfile_story, outfile_user, outfile_log_name = set_up_files_and_logger()
+    logging.basicConfig(filename=outfile_log_name, level=logging.DEBUG)
+    print "Logging to %s" % outfile_log_name
 
-    nodes_to_export = get_nodes_to_export_from_db()
+    if args.changed_epoch:
+        highest_changed_epoch = int(args.changed_epoch)
+
+    else:
+        if os.path.exists('.highest_changed_epoch'):
+            epoch_changed_file = open('.highest_changed_epoch', 'r')
+            highest_changed_epoch = int(epoch_changed_file.read() or '0')
+        else:
+            highest_changed_epoch = 0
+
+    nodes_to_export = get_nodes_to_export_from_db(highest_changed_epoch)
+
     if len(nodes_to_export) > 0:
-        print "Found %d stories to export" % len(nodes_to_export)
+        logging.info("Found %d stories to export" % len(nodes_to_export))
         if args.dry_run:
             return
-        story_success_count, user_success_count, error_count = write_html_content_to_output(nodes_to_export)
-        print "Parsed %d stories" % story_success_count
-        print "Parsed %d users" % user_success_count
-        print "Had %d HTTP errors" % error_count
+        story_success_count, user_success_count, error_count = write_html_content_to_output(
+            nodes_to_export,
+            outfile_story,
+            outfile_user,
+        )
+
+        outfile_story.close()
+        outfile_user.close()
+
+        logging.info("Parsed %d stories" % story_success_count)
+        logging.info("Parsed %d users" % user_success_count)
+        logging.info("Had %d errors" % error_count)
     else:
-        print "Didn't find anything to export"
+        logging.info("Didn't find anything to export")
     endtime = datetime.datetime.now()
     total_time = endtime - starttime
-    print "total time: %s" % total_time
+    logging.info("total time: %s" % total_time)
 if __name__ == "__main__":
     main()

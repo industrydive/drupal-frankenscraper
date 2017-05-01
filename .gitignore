@@ -1,1 +1,4 @@
 *.jl
+*.log
+output/*
+.highest_changed_epoch
