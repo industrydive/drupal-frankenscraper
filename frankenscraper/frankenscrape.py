@@ -54,7 +54,13 @@ def main():
     print "GIVE MY CREATION LIFE"
     logging_format = '%(levelname)-8s %(message)s'
     starttime = datetime.datetime.now()
-    outfile_story, outfile_user, outfile_log_name = set_up_files_and_logger()
+    (
+        outfile_dir,
+        outfile_story,
+        outfile_user,
+        outfile_log_name
+    ) = set_up_files_and_logger()
+
     logging.basicConfig(
         filename=outfile_log_name,
         level=logging.DEBUG,
@@ -67,6 +73,7 @@ def main():
     logging.getLogger('').addHandler(console)
 
     logging.info("Logging to %s" % outfile_log_name)
+    logging.info("Output directory: %s" % outfile_dir)
 
     db = get_db_connection()
     if args.changed_epoch:
@@ -85,29 +92,32 @@ def main():
     if len(nodes_to_export) > 0:
         logging.info("Found %d stories to export" % len(nodes_to_export))
         if args.dry_run:
-            return
-        (
-            story_success_count,
-            user_success_count,
-            error_count
-        ) = write_html_content_to_output(
-            db,
-            nodes_to_export,
-            outfile_story,
-            outfile_user,
-        )
+            pass
+        else:
+            (
+                story_success_count,
+                user_success_count,
+                error_count
+            ) = write_html_content_to_output(
+                db,
+                nodes_to_export,
+                outfile_story,
+                outfile_user,
+            )
 
-        outfile_story.close()
-        outfile_user.close()
+            logging.info("Parsed %d stories" % story_success_count)
+            logging.info("Parsed %d users" % user_success_count)
+            logging.info("Had %d errors" % error_count)
 
-        logging.info("Parsed %d stories" % story_success_count)
-        logging.info("Parsed %d users" % user_success_count)
-        logging.info("Had %d errors" % error_count)
     else:
         logging.info("Didn't find anything to export")
+
+    outfile_story.close()
+    outfile_user.close()
+
     endtime = datetime.datetime.now()
     total_time = endtime - starttime
-    logging.info("total time: %s" % total_time)
+    logging.info("Total time: %s" % total_time)
 
 if __name__ == "__main__":
     main()

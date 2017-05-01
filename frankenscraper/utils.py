@@ -11,14 +11,14 @@ from bs4 import BeautifulSoup
 
 def set_up_files_and_logger():
     file_time = time.strftime("%Y-%m-%d_%H:%M:%S")
-    out_dir = 'output/%s' % file_time
-    os.makedirs(out_dir)
+    outfile_dir = 'output/%s' % file_time
+    os.makedirs(outfile_dir)
 
-    outfile_story = open('%s/story.jl' % out_dir, 'w+')
-    outfile_user = open('%s/user.jl' % out_dir, 'w+')
-    outfile_log_name = '%s/frankenscrape.log' % out_dir
+    outfile_story = open('%s/story.jl' % outfile_dir, 'w+')
+    outfile_user = open('%s/user.jl' % outfile_dir, 'w+')
+    outfile_log_name = '%s/frankenscrape.log' % outfile_dir
 
-    return outfile_story, outfile_user, outfile_log_name
+    return outfile_dir, outfile_story, outfile_user, outfile_log_name
 
 
 def get_db_connection():
@@ -72,26 +72,6 @@ def get_meta_description(page):
 
 def get_story_title(page):
     return page.body.find('div', property='dc:title').h3.a.text
-
-
-def get_user_db_data(username, db):
-    # derive the UID from the source URL for the profile:
-    user_url_alias_query = (
-        "select substring(source, 6) as uid from url_alias "
-        "where alias = 'users/%s'" % username
-    )
-    user_url_alias_cursor = db.cursor()
-    user_url_alias_cursor.execute(user_url_alias_query)
-    uid = None
-    for uid in user_url_alias_cursor:
-        uid = uid
-    if uid:
-        user_query = "select uid, mail from users where uid = %s" % uid
-        user_cursor = db.cursor()
-        user_cursor.execute(user_query)
-        for uid, mail in user_cursor:
-            return uid, mail
-    return None, None
 
 
 def get_pub_and_author_info(page):
@@ -183,26 +163,31 @@ def get_nodes_to_export_from_db(changed_epoch, db, args):
     # this query gets back the identifying information for the posts we want
     # as well as the node and full path URLs that we can use to get the current
     # actual HTML page
-    logging.info("exporting from %s" % changed_epoch)
+    logging.info("Building query for stories changed from %s" % changed_epoch)
     node_query = (
-        "select n.nid, n.changed, n.type as content_type, u.alias, u.source "
-        "from node n join url_alias u on u.source = CONCAT('node/', n.nid) "
+        "select n.nid, user.uid, user.mail, n.changed, "
+        "n.type as content_type, u.alias, u.source "
+        "from node n "
+        "join users user on n.uid = user.uid "
+        "join url_alias u on u.source = CONCAT('node/', n.nid) "
         "where n.type ='post' and n.status = 1 "
         "and u.pid=(select pid from url_alias where source = u.source "
         "order by pid desc limit 1) "
         "and n.changed > %d "
         "order by n.changed ASC "
     )
-    logging.debug("using query: %s" % node_query)
+    logging.debug("Query is: %s" % node_query)
     node_query = node_query % changed_epoch
     if args.limit:
         node_query = node_query + 'limit %s' % args.limit
     node_cursor = db.cursor()
     node_cursor.execute(node_query)
     nodes = []
-    for nid, changed, content_type, alias, source in node_cursor:
+    for nid, uid, mail, changed, content_type, alias, source in node_cursor:
         node_data = {
             'nid': nid,
+            'uid': uid,
+            'user_email': mail,
             'changed': changed,
             'content_type': content_type,
             'node_url_path': source,
@@ -223,7 +208,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
         page, error = get_page(full_url)
-        logging.debug("exporting node %s at url %s" % (
+        logging.debug("Exporting node %s at url %s" % (
             node['nid'], node['url_path'])
         )
 
@@ -246,10 +231,9 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
                 if node['author_link'] not in author_links:
                     author_links.append(node['author_link'])
 
-                    uid, email = get_user_db_data(node['author_username'], db)
                     user_page_data = {
-                        'uid': uid,
-                        'email': email,
+                        'uid': node['uid'],
+                        'email': node['user_email'],
                         'profile_url': node['author_link'],
                         'username': node['author_username']
                     }
@@ -272,6 +256,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
                     else:
                         error_data = {
                             'object_type': 'user',
+                            'id': node['uid'],
                             'type': 'HTTP error',
                             'url': node['author_link'],
                             'error': user_page_error,
@@ -295,6 +280,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
             except Exception, e:
                 error_data = {
                     'object_type': 'story',
+                    'id': node['nid'],
                     'type': 'parsing error',
                     'url': full_url,
                     'error': str(e),
@@ -305,6 +291,7 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story,
         else:
             error_data = {
                 'object_type': 'story',
+                'id': node['nid'],
                 'type': 'HTTP error',
                 'url': full_url,
                 'error': error,
