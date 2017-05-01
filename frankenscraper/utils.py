@@ -76,7 +76,10 @@ def get_story_title(page):
 
 def get_user_db_data(username, db):
     # derive the UID from the source URL for the profile:
-    user_url_alias_query = "select substring(source, 6) as uid from url_alias where alias = 'users/%s'" % username
+    user_url_alias_query = (
+        "select substring(source, 6) as uid from url_alias "
+        "where alias = 'users/%s'" % username
+    )
     user_url_alias_cursor = db.cursor()
     user_url_alias_cursor.execute(user_url_alias_query)
     uid = None
@@ -92,7 +95,10 @@ def get_user_db_data(username, db):
 
 
 def get_pub_and_author_info(page):
-    pub_date_div = page.body.find('div', {'class': 'field-name-post-date-author-name'})
+    pub_date_div = page.body.find(
+        'div',
+        {'class': 'field-name-post-date-author-name'}
+    )
     author_name = pub_date_div.p.a.text
     pub_date = pub_date_div.p.text.replace(author_name, '').strip()
     author_link = pub_date_div.p.a['href']
@@ -113,7 +119,9 @@ def get_author_div_text(page, target_class):
     """
     target_div = page.body.find('div', {'class': target_class})
     if target_div:
-        target_content_div = target_div.find('div', {'class': 'field-item even'})
+        target_content_div = target_div.find(
+            'div', {'class': 'field-item even'}
+        )
         result = target_content_div.text.strip()
         return printable(result)
     return None
@@ -144,9 +152,15 @@ def get_author_social_urls(page):
     ]
     social_network_links = {}
     for link_id in social_network_link_ids:
-        link_div = page.body.find('div', {'class': 'field-name-field-user-%s-url' % link_id})
+        link_div = page.body.find(
+            'div',
+            {'class': 'field-name-field-user-%s-url' % link_id}
+        )
         if link_div:
-            link_content_div = link_div.find('div', {'class': 'field-item even'})
+            link_content_div = link_div.find(
+                'div',
+                {'class': 'field-item even'}
+            )
             social_network_links[link_id] = link_content_div.a['href']
         else:
             social_network_links[link_id] = None
@@ -174,7 +188,8 @@ def get_nodes_to_export_from_db(changed_epoch, db, args):
         "select n.nid, n.changed, n.type as content_type, u.alias, u.source "
         "from node n join url_alias u on u.source = CONCAT('node/', n.nid) "
         "where n.type ='post' and n.status = 1 "
-        "and u.pid=(select pid from url_alias where source = u.source order by pid desc limit 1) "
+        "and u.pid=(select pid from url_alias where source = u.source "
+        "order by pid desc limit 1) "
         "and n.changed > %d "
         "order by n.changed ASC "
     )
@@ -197,7 +212,8 @@ def get_nodes_to_export_from_db(changed_epoch, db, args):
     return nodes
 
 
-def write_html_content_to_output(db, nodes_to_export, outfile_story, outfile_user):
+def write_html_content_to_output(db, nodes_to_export, outfile_story,
+                                 outfile_user):
     author_links = []
     story_success_count = 0
     user_success_count = 0
@@ -207,7 +223,9 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story, outfile_use
     for node in nodes_to_export:
         full_url = settings.site_url + '/' + node['url_path']
         page, error = get_page(full_url)
-        logging.info("exporting node %s at url %s" % (node['nid'], node['url_path']))
+        logging.debug("exporting node %s at url %s" % (
+            node['nid'], node['url_path'])
+        )
 
         if page:
             try:
@@ -274,7 +292,6 @@ def write_html_content_to_output(db, nodes_to_export, outfile_story, outfile_use
                     epoch_changed_file.write(str(node['changed']))
                     epoch_changed_file.close()
                     highest_epoch = int(node['changed'])
-                    logging.debug('updated highest_epoch to %s' % highest_epoch)
             except Exception, e:
                 error_data = {
                     'object_type': 'story',
